@@ -234,7 +234,7 @@ def main():
             w.writerow([f"{r[0]:.2f}", f"{r[1]:.2f}", f"{r[2]:.2f}", str(r[3])])
 
     elapsed = time.perf_counter() - t0
-    corrected = sum(1 for r in rows if r[3] >= 1)
+    corrected = sum(1 for r in rows if r[3] == 1)
     print(f"Done: {output_path}")
     print(f"  Rows: {len(rows)}  Corrected: {corrected}")
     print(f"  OCR: {t_ocr:.1f}s  Correction: {t_corr:.1f}s  Total: {elapsed:.1f}s")
