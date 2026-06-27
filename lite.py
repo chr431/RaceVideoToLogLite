@@ -41,9 +41,14 @@ def parse_args() -> argparse.Namespace:
 
 def extract_frames(video_path: Path, region, div: int,
                    frame_start: int | None, frame_end: int | None):
-    """Extract cropped frames from video at div interval."""
+    """Extract cropped frames from video at div interval.
+
+    Uses grab/retrieve pattern: grab() skips frames without decoding (fast),
+    retrieve() decodes only the frames we keep.
+    """
     cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     x1, y1, x2, y2 = clamp_region(region, width, height)
@@ -51,19 +56,34 @@ def extract_frames(video_path: Path, region, div: int,
     frames = []
     fi = 0
     while True:
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            break
         if frame_end is not None and fi >= frame_end:
             break
+
+        # grab() reads raw compressed data – fast, no decode
+        grabbed = cap.grab()
+        if not grabbed:
+            break
+
         if frame_start is not None and fi < frame_start:
             fi += 1; continue
         if fi % div != 0:
             fi += 1; continue
+
+        # retrieve() decodes the last grabbed frame
+        ok, frame = cap.retrieve()
+        if not ok or frame is None:
+            fi += 1; continue
+
         ts = fi / fps if fps > 0 else 0.0
         crop = frame[y1:y2 + 1, x1:x2 + 1].copy()
         frames.append((ts, crop))
         fi += 1
+
+        if len(frames) % 100 == 0 and total_frames > 0:
+            print(f"\r  Extract: {fi}/{total_frames}", end="", flush=True)
+
+    if total_frames > 0 and len(frames) >= 100:
+        print(f"\r  Extract: {total_frames}/{total_frames}")
     cap.release()
     return frames, fps
 
