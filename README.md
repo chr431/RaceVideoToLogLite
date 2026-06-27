@@ -136,3 +136,7 @@ pyinstaller RaceVideoToLogLite.spec --noconfirm
 ## License
 
 MIT
+
+---
+
+**@SCUT 202430350049**
