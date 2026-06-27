@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Virtual env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary & backup
+*.tmp
+*.log
+~$*
+.*.bkp
+
+# Course design template (not part of the project)
+课程设计报告模板2026.docx

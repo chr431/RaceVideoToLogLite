@@ -1,0 +1,4 @@
+rapidocr_onnxruntime
+onnxruntime
+opencv-python>=4.10
+numpy>=2.0
