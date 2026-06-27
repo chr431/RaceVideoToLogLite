@@ -12,12 +12,13 @@ _reocr_cache: dict[int, set] = {}
 
 def correct_with_anchors(rows, observations, raw_frames, ocr,
                          max_speed_kmh, max_accel_mps2, anchor_indices,
-                         log_fn=None):
+                         log_fn=None, progress_fn=None):
 	"""5 阶段物理约束纠错流水线。
 
 	以 anchor_indices 中帧的速度为硬约束（固定不变），
 	对其余帧进行错误检测、重OCR、最优选择和级联填充。
 
+	progress_fn(done, total): 滚动进度回调，在每个待修复帧处理完时调用。
 	Returns: 修改后的 rows（原地修改）
 	"""
 	if len(anchor_indices) < 2:
@@ -39,7 +40,8 @@ def correct_with_anchors(rows, observations, raw_frames, ocr,
 
 	# ── 阶段 2+3：重 OCR + 最优选择（首轮）──
 	fixed = _fix_errors(rows, observations, raw_frames, ocr, error_set,
-	                    anchors, times, max_speed_kmh, max_accel_mps2)
+	                    anchors, times, max_speed_kmh, max_accel_mps2,
+	                    progress_fn=progress_fn)
 	if log_fn:
 		log_fn(f"  Stage 2+3: fixed {fixed} frames in round 1")
 
@@ -50,7 +52,8 @@ def correct_with_anchors(rows, observations, raw_frames, ocr,
 		if not error_set:
 			break
 		fixed = _fix_errors(rows, observations, raw_frames, ocr, error_set,
-		                    anchors, times, max_speed_kmh, max_accel_mps2)
+		                    anchors, times, max_speed_kmh, max_accel_mps2,
+		                    progress_fn=progress_fn)
 		if log_fn:
 			log_fn(f"  Stage 4 round {rnd}: {len(error_set)} errors, fixed {fixed}")
 
@@ -60,7 +63,8 @@ def correct_with_anchors(rows, observations, raw_frames, ocr,
 		error_set = _detect_errors(rows, anchors, times, max_speed_kmh, max_accel_mps2)
 		if not error_set:
 			break
-		_fill_unrecoverable(rows, anchors, error_set, times, max_speed_kmh, max_accel_mps2)
+		_fill_unrecoverable(rows, anchors, error_set, times, max_speed_kmh, max_accel_mps2,
+		                    progress_fn=progress_fn)
 		if log_fn:
 			log_fn(f"  Stage 5 pass {fill_pass+1}: filled {len(error_set)} unrecoverable frames")
 		fill_pass += 1
@@ -207,12 +211,14 @@ def _detect_errors(rows, anchors, times, max_speed_kmh, max_accel_mps2):
 
 
 def _fix_errors(rows, observations, raw_frames, ocr, error_set,
-                anchors, times, max_speed_kmh, max_accel_mps2):
+                anchors, times, max_speed_kmh, max_accel_mps2,
+                progress_fn=None):
 	"""阶段 2+3：对每个 error 帧重 OCR 获取备选，选最优值填入。"""
 	fixed = 0
-	for i in error_set:
-		if i in anchors:
-			continue
+	progress_done = 0
+	error_list = sorted(i for i in error_set if i not in anchors)
+	total = len(error_list)
+	for i in error_list:
 		candidates = list(_re_ocr_frame(raw_frames[i][1], ocr, max_speed_kmh))
 		interp_cand = _interp_candidate(i, rows, anchors, times, max_speed_kmh)
 		if interp_cand is not None:
@@ -221,36 +227,38 @@ def _fix_errors(rows, observations, raw_frames, ocr, error_set,
 		confusion_cands = build_speed_candidates(observations[oid].raw_text, max_speed_kmh)
 		candidates.extend(c for c in confusion_cands if c not in candidates)
 
-		if not candidates:
-			continue
+		if candidates:
+			raw_val = rows[i][2]
+			reocr_unique = _re_ocr_frame(raw_frames[i][1], ocr, max_speed_kmh)
 
-		# 若重 OCR 无法产生与原值不同的候选，且插值候选偏差 > 10 km/h，
-		# 直接使用插值（信任物理模型优于 OCR）
-		raw_val = rows[i][2]
-		reocr_unique = _re_ocr_frame(raw_frames[i][1], ocr, max_speed_kmh)
-		if len(reocr_unique) <= 1 and interp_cand is not None and abs(interp_cand - raw_val) > 10.0:
-			if abs(raw_val - interp_cand) > 0.5:
-				rows[i][2] = interp_cand
-				if rows[i][3] == 0:
-					rows[i][3] = 1
-				fixed += 1
-			continue
+			# 若重 OCR 无法产生与原值不同的候选，且插值候选偏差 > 10 km/h，
+			# 直接使用插值（信任物理模型优于 OCR）
+			if len(reocr_unique) <= 1 and interp_cand is not None and abs(interp_cand - raw_val) > 10.0:
+				if abs(raw_val - interp_cand) > 0.5:
+					rows[i][2] = interp_cand
+					if rows[i][3] == 0:
+						rows[i][3] = 1
+					fixed += 1
+			else:
+				best_val = None
+				best_score = -1.0
+				for cand in set(candidates):
+					if not (0 <= cand <= max_speed_kmh):
+						continue
+					score = _score_candidate(cand, i, rows, anchors, error_set, times, max_speed_kmh, max_accel_mps2)
+					if score > best_score:
+						best_score = score
+						best_val = cand
 
-		best_val = None
-		best_score = -1.0
-		for cand in set(candidates):
-			if not (0 <= cand <= max_speed_kmh):
-				continue
-			score = _score_candidate(cand, i, rows, anchors, error_set, times, max_speed_kmh, max_accel_mps2)
-			if score > best_score:
-				best_score = score
-				best_val = cand
+				if best_val is not None and abs(rows[i][2] - best_val) > 0.5:
+					rows[i][2] = best_val
+					if rows[i][3] == 0:
+						rows[i][3] = 1
+					fixed += 1
 
-		if best_val is not None and abs(rows[i][2] - best_val) > 0.5:
-			rows[i][2] = best_val
-			if rows[i][3] == 0:
-				rows[i][3] = 1
-			fixed += 1
+		progress_done += 1
+		if progress_fn:
+			progress_fn(progress_done, total)
 	return fixed
 
 
@@ -383,35 +391,41 @@ def _score_candidate(val, i, rows, anchors, error_set, times, max_speed_kmh, max
 	return neighbor_score * 0.4 + anchor_score * 0.35 + smoothness_score * 0.25
 
 
-def _fill_unrecoverable(rows, anchors, error_set, times, max_speed_kmh, max_accel_mps2):
+def _fill_unrecoverable(rows, anchors, error_set, times, max_speed_kmh, max_accel_mps2,
+                        progress_fn=None):
 	"""阶段 5：对无法通过重 OCR 修复的帧，从左到右传播可信值。"""
 	n = len(rows)
 	sorted_errors = sorted(i for i in error_set if i not in anchors)
+	total = len(sorted_errors)
+	progress_done = 0
 	for i in sorted_errors:
 		la = None
 		for j in range(i - 1, -1, -1):
 			if j in anchors or j not in error_set:
 				if 0 <= rows[j][2] <= max_speed_kmh:
 					la = j; break
-		if la is None:
-			continue
-		lv = rows[la][2]; lt = rows[la][0]
-		ra = None
-		for j in range(i + 1, n):
-			if j in anchors:
-				if 0 <= rows[j][2] <= max_speed_kmh:
-					ra = j; break
-		if ra is not None:
-			rv = rows[ra][2]; rt = rows[ra][0]
-			total_dt = max(rt - lt, 0.001)
-			frac = (times[i] - lt) / total_dt
-			val = lv + (rv - lv) * frac
-		else:
-			val = lv
-		dt = max(times[i] - lt, 0.001)
-		max_dv = max_accel_mps2 * dt * 3.6
-		val = max(lv - max_dv, min(lv + max_dv, val))
-		val = max(0.0, min(max_speed_kmh, val))
-		rows[i][2] = val
-		if rows[i][3] == 0:
-			rows[i][3] = 1
+		if la is not None:
+			lv = rows[la][2]; lt = rows[la][0]
+			ra = None
+			for j in range(i + 1, n):
+				if j in anchors:
+					if 0 <= rows[j][2] <= max_speed_kmh:
+						ra = j; break
+			if ra is not None:
+				rv = rows[ra][2]; rt = rows[ra][0]
+				total_dt = max(rt - lt, 0.001)
+				frac = (times[i] - lt) / total_dt
+				val = lv + (rv - lv) * frac
+			else:
+				val = lv
+			dt = max(times[i] - lt, 0.001)
+			max_dv = max_accel_mps2 * dt * 3.6
+			val = max(lv - max_dv, min(lv + max_dv, val))
+			val = max(0.0, min(max_speed_kmh, val))
+			rows[i][2] = val
+			if rows[i][3] == 0:
+				rows[i][3] = 1
+
+		progress_done += 1
+		if progress_fn:
+			progress_fn(progress_done, total)

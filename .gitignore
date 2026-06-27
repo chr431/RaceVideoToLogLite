@@ -28,5 +28,11 @@ Thumbs.db
 ~$*
 .*.bkp
 
+# Test data
+test*.mp4
+test*.avi
+test*.mkv
+args.txt
+
 # Course design template (not part of the project)
 课程设计报告模板2026.docx

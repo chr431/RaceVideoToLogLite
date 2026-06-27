@@ -119,10 +119,11 @@ def run_ocr(frames, ocr, target_h, pad_px, max_speed):
         else:
             observations.append(SpeedObservation(ts, -1.0, ""))
 
-        if (idx + 1) % 50 == 0:
+        if (idx + 1) % 5 == 0:
             print(f"\r  OCR: {idx + 1}/{len(frames)}", end="", flush=True)
 
-    print(f"\r  OCR: {len(frames)} frames, {len([o for o in observations if o.raw_speed_kmh >= 0])} recognized")
+    recognized = len([o for o in observations if o.raw_speed_kmh >= 0])
+    print(f"\r  OCR: {len(frames)} frames, {recognized} recognized")
     return observations
 
 
@@ -152,9 +153,12 @@ def main():
 
     # ── OCR ──
     # CPU-only backend
+    print("Initializing OCR engine...")
     kwargs = _get_model_kwargs("v5_mobile")
     ocr = RapidOCR(**(kwargs or {}))
+    t_ocr_start = time.perf_counter()
     observations = run_ocr(frames, ocr, _TARGET_H, _PAD, _MAX_SPEED)
+    t_ocr = time.perf_counter() - t_ocr_start
 
     if not observations:
         print("Error: no speed data recognized")
@@ -172,9 +176,21 @@ def main():
         else:
             rows.append([obs.timestamp, 0.0, obs.raw_speed_kmh, 0])
 
+    # Correction with scrolling progress
+    total_frames = len(rows)
     print("Running correction...")
-    rows = correct_with_anchors(rows, observations, frames, ocr,
-                                 _MAX_SPEED, _MAX_ACCEL, anchors)
+    t_corr_start = time.perf_counter()
+
+    def _corr_progress(done, total):
+        print(f"\r  Correction: {done}/{total}", end="", flush=True)
+
+    rows = correct_with_anchors(
+        rows, observations, frames, ocr,
+        _MAX_SPEED, _MAX_ACCEL, anchors,
+        progress_fn=_corr_progress,
+    )
+    print(f"\r  Correction: {total_frames} frames processed")
+    t_corr = time.perf_counter() - t_corr_start
 
     # ── Integrate distance ──
     dist = 0.0; prev_t = prev_v = None
@@ -199,7 +215,9 @@ def main():
 
     elapsed = time.perf_counter() - t0
     corrected = sum(1 for r in rows if r[3] >= 1)
-    print(f"Done: {output_path}  ({len(rows)} rows, {corrected} corrected, {elapsed:.1f}s)")
+    print(f"Done: {output_path}")
+    print(f"  Rows: {len(rows)}  Corrected: {corrected}")
+    print(f"  OCR: {t_ocr:.1f}s  Correction: {t_corr:.1f}s  Total: {elapsed:.1f}s")
 
 
 if __name__ == "__main__":
